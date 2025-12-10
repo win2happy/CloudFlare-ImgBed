@@ -1,3 +1,5 @@
+import { getDatabase } from '../../../utils/databaseAdapter.js';
+
 export async function onRequest(context) {
     // 安全设置相关，GET方法读取设置，POST方法保存设置
     const {
@@ -9,11 +11,11 @@ export async function onRequest(context) {
       data, // arbitrary space for passing data between middlewares
     } = context;
 
-    const kv = env.img_url
+    const db = getDatabase(env);
 
     // GET读取设置
     if (request.method === 'GET') {
-        const settings = await getSecurityConfig(kv, env)
+        const settings = await getSecurityConfig(db, env)
 
         return new Response(JSON.stringify(settings), {
             headers: {
@@ -24,13 +26,20 @@ export async function onRequest(context) {
 
     // POST保存设置
     if (request.method === 'POST') {
+        const settings = await getSecurityConfig(db, env) // 先读取已有设置，再进行覆盖
+
         const body = await request.json()
-        const settings = body
+        const newSettings = body
 
-        // 写入 KV
-        await kv.put('manage@sysConfig@security', JSON.stringify(settings))
+        // 覆盖设置，apiTokens不在这里修改
+        settings.auth = newSettings.auth || settings.auth
+        settings.upload = newSettings.upload || settings.upload
+        settings.access = newSettings.access || settings.access
 
-        return new Response(JSON.stringify(settings), {
+        // 写入数据库
+        await db.put('manage@sysConfig@security', JSON.stringify(settings))
+
+        return new Response('security settings saved', {
             headers: {
                 'content-type': 'application/json',
             },
@@ -39,10 +48,10 @@ export async function onRequest(context) {
 
 }
 
-export async function getSecurityConfig(kv, env) {
+export async function getSecurityConfig(db, env) {
     const settings = {}
-    // 读取KV中的设置
-    const settingsStr = await kv.get('manage@sysConfig@security')
+    // 读取数据库中的设置
+    const settingsStr = await db.get('manage@sysConfig@security')
     const settingsKV = settingsStr ? JSON.parse(settingsStr) : {}
 
     // 认证管理
@@ -77,6 +86,13 @@ export async function getSecurityConfig(kv, env) {
         whiteListMode: kvAccess.whiteListMode ?? env.WhiteList_Mode === 'true',
     }
     settings.access = access
+
+    // API Token 管理
+    const kvApiTokens = settingsKV.apiTokens || {}
+    const apiTokens = {
+        tokens: kvApiTokens.tokens || {}
+    }
+    settings.apiTokens = apiTokens
 
     return settings;
 }

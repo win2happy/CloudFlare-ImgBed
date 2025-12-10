@@ -1,6 +1,6 @@
 <div align="center">
     <a href="https://github.com/MarSeventh/CloudFlare-ImgBed"><img width="80%" alt="logo" src="static/readme/banner.png"/></a>
-    <p><em>🗂️Open-source file hosting solution, supporting Docker and serverless deployment, supporting multiple storage channels such as Telegram Bot, Cloudflare R2, S3, etc.</em></p>
+    <p><em>🗂️Open-source file hosting solution, supporting Docker and serverless deployment, supporting multiple storage channels such as Telegram Bot, Cloudflare R2, S3, etc., supporting WebDAV protocol and various RESTful APIs.</em></p>
     <p>
         <a href="https://github.com/MarSeventh/CloudFlare-ImgBed/blob/main/README.md">简体中文</a> | <a href="https://github.com/MarSeventh/CloudFlare-ImgBed/blob/main/README_en.md">English</a> | <a
         href="https://cfbed.sanyue.de/en">Official Website</a>
@@ -48,7 +48,7 @@
 
 ## 2025.2.6 Version 2.0 Upgrade Notes
 
-> The v2.0 beta version has been released, with many changes and optimizations compared to v1.0. However, the beta version may have potential instability. If you prefer stability, you may delay updating.
+> The v2.0 version has been released, with many changes and optimizations compared to v1.0. However, the beta version may have potential instability. If you prefer stability, you may delay updating.
 >
 > Due to **changes in the build command**, this update requires **manual operation**. Please follow these steps:
 >
@@ -96,6 +96,8 @@ Provides detailed deployment documentation, feature docs, development plans, upd
 
 ![image-20250314152355339](static/readme/202503141524797.png)
 
+![status-page](static/readme/status-page.png)
+
 ![image-20250313204325002](static/readme/202503132043265.png)
 
 </details>
@@ -130,6 +132,4 @@ Provides detailed deployment documentation, feature docs, development plans, upd
 
   <a href="https://www.cloudflare.com"><img src="static/readme/cloudflare-logo.png" alt="Cloudflare Logo" height="25"></a> <a href="https://edgeone.ai/?from=github"><img src="https://edgeone.ai/media/34fe3a45-492d-4ea4-ae5d-ea1087ca7b4b.png" alt="Tencent Logo" height="25"></a>
 
-- **[AsiaYun](https://www.asiayun.com) & [DartNode](https://dartnode.com)**：Provides cloud computing resources support
-
-  [![Powered by DartNode](https://dartnode.com/branding/DN-Open-Source-sm.png)](https://dartnode.com "Powered by DartNode - Free VPS for Open Source")
+- **[svyun](https://www.svyun.com/recommend/AELZ0UeMz8K11Zg7pEXC)**：Provides cloud computing resources support

@@ -1,11 +1,14 @@
 import { userAuthCheck, UnauthorizedResponse } from "../utils/userAuth";
 import { fetchUploadConfig, fetchSecurityConfig } from "../utils/sysConfig";
-import { createResponse, getUploadIp, getIPAddress, isExtValid, 
-        moderateContent, purgeCDNCache, isBlockedUploadIp, buildUniqueFileId } from "./uploadTools";
-import { initializeChunkedUpload, handleChunkUpload, uploadLargeFileToTelegram, handleCleanupRequest} from "./chunkUpload";
-import { handleChunkMerge, checkMergeStatus } from "./chunkMerge";
+import {
+    createResponse, getUploadIp, getIPAddress, isExtValid,
+    moderateContent, purgeCDNCache, isBlockedUploadIp, buildUniqueFileId, endUpload
+} from "./uploadTools";
+import { initializeChunkedUpload, handleChunkUpload, uploadLargeFileToTelegram, handleCleanupRequest } from "./chunkUpload";
+import { handleChunkMerge } from "./chunkMerge";
 import { TelegramAPI } from "../utils/telegramAPI";
 import { S3Client, PutObjectCommand } from "@aws-sdk/client-s3";
+import { getDatabase } from '../utils/databaseAdapter.js';
 
 
 export async function onRequest(context) {  // Contents of context object
@@ -18,12 +21,13 @@ export async function onRequest(context) {  // Contents of context object
     // 读取各项配置，存入 context
     const securityConfig = await fetchSecurityConfig(env);
     const uploadConfig = await fetchUploadConfig(env);
-    
+
     context.securityConfig = securityConfig;
     context.uploadConfig = uploadConfig;
 
     // 鉴权
-    if (!await userAuthCheck(env, url, request)) {
+    const requiredPermission = 'upload';
+    if (!await userAuthCheck(env, url, request, requiredPermission)) {
         return UnauthorizedResponse('Unauthorized');
     }
 
@@ -34,25 +38,13 @@ export async function onRequest(context) {  // Contents of context object
     if (isBlockedIp) {
         return createResponse('Error: Your IP is blocked', { status: 403 });
     }
-    
-    // KV 未定义或为空的处理逻辑
-    if (typeof env.img_url == "undefined" || env.img_url == null || env.img_url == "") {
-        return createResponse('Error: Please configure KV database', { status: 500 });
-    } 
-
-    // 检查是否为状态查询请求
-    const statusCheck = url.searchParams.get('statusCheck') === 'true';
-    if (statusCheck) {
-        const uploadId = url.searchParams.get('uploadId');
-        return await checkMergeStatus(env, uploadId);
-    }
 
     // 检查是否为清理请求
     const cleanupRequest = url.searchParams.get('cleanup') === 'true';
     if (cleanupRequest) {
         const uploadId = url.searchParams.get('uploadId');
         const totalChunks = parseInt(url.searchParams.get('totalChunks')) || 0;
-        return await handleCleanupRequest(env, uploadId, totalChunks);
+        return await handleCleanupRequest(context, uploadId, totalChunks);
     }
 
     // 检查是否为初始化分块上传请求
@@ -64,7 +56,7 @@ export async function onRequest(context) {  // Contents of context object
     // 检查是否为分块上传
     const isChunked = url.searchParams.get('chunked') === 'true';
     const isMerge = url.searchParams.get('merge') === 'true';
-    
+
     if (isChunked) {
         if (isMerge) {
             return await handleChunkMerge(context);
@@ -80,11 +72,11 @@ export async function onRequest(context) {  // Contents of context object
 
 // 通用文件上传处理函数
 async function processFileUpload(context, formdata = null) {
-    const { request, env, url } = context;
+    const { request, url } = context;
 
     // 解析表单数据
     formdata = formdata || await request.formData();
-    
+
     // 将 formdata 存储在 context 中
     context.formdata = formdata;
 
@@ -122,18 +114,18 @@ async function processFileUpload(context, formdata = null) {
     const fileType = formdata.get('file').type;
     let fileName = formdata.get('file').name;
     const fileSize = (formdata.get('file').size / 1024 / 1024).toFixed(2); // 文件大小，单位MB
-    
+
     // 检查fileType和fileName是否存在
     if (fileType === null || fileType === undefined || fileName === null || fileName === undefined) {
         return createResponse('Error: fileType or fileName is wrong, check the integrity of this file!', { status: 400 });
     }
-    
+
     // 如果上传文件夹路径为空，尝试从文件名中获取
     if (uploadFolder === '' || uploadFolder === null || uploadFolder === undefined) {
         uploadFolder = fileName.split('/').slice(0, -1).join('/');
     }
     // 处理文件夹路径格式，确保没有开头的/
-    const normalizedFolder = uploadFolder 
+    const normalizedFolder = uploadFolder
         ? uploadFolder.replace(/^\/+/, '') // 移除开头的/
             .replace(/\/{2,}/g, '/') // 替换多个连续的/为单个/
             .replace(/\/$/, '') // 移除末尾的/
@@ -148,7 +140,8 @@ async function processFileUpload(context, formdata = null) {
         ListType: "None",
         TimeStamp: time,
         Label: "None",
-        Folder: normalizedFolder || 'root',
+        Directory: normalizedFolder === '' ? '' : normalizedFolder + '/',
+        Tags: []
     };
 
     let fileExt = fileName.split('.').pop(); // 文件扩展名
@@ -172,10 +165,6 @@ async function processFileUpload(context, formdata = null) {
     } else {
         returnLink = `/file/${fullId}`;
     }
-
-    // 清除CDN缓存
-    const cdnUrl = `https://${url.hostname}/file/${fullId}`;
-    await purgeCDNCache(env, cdnUrl, url, normalizedFolder);
 
     /* ====================================不同渠道上传======================================= */
     // 出错是否切换渠道自动重试，默认开启
@@ -220,7 +209,8 @@ async function processFileUpload(context, formdata = null) {
 
 // 上传到Cloudflare R2
 async function uploadFileToCloudflareR2(context, fullId, metadata, returnLink) {
-    const { env, uploadConfig, formdata } = context;
+    const { env, waitUntil, uploadConfig, formdata } = context;
+    const db = getDatabase(env);
 
     // 检查R2数据库是否配置
     if (typeof env.img_r2 == "undefined" || env.img_r2 == null || env.img_r2 == "") {
@@ -234,7 +224,7 @@ async function uploadFileToCloudflareR2(context, fullId, metadata, returnLink) {
     }
 
     const r2Channel = r2Settings.channels[0];
-    
+
     const R2DataBase = env.img_r2;
 
     // 写入R2数据库
@@ -249,22 +239,24 @@ async function uploadFileToCloudflareR2(context, fullId, metadata, returnLink) {
     let moderateUrl = `${R2PublicUrl}/${fullId}`;
     metadata.Label = await moderateContent(env, moderateUrl);
 
-    // 写入KV数据库
+    // 写入数据库
     try {
-        await env.img_url.put(fullId, "", {
+        await db.put(fullId, "", {
             metadata: metadata,
         });
     } catch (error) {
-        return createResponse('Error: Failed to write to KV database', { status: 500 });
+        return createResponse('Error: Failed to write to database', { status: 500 });
     }
 
+    // 结束上传
+    waitUntil(endUpload(context, fullId, metadata));
 
     // 成功上传，将文件ID返回给客户端
     return createResponse(
-        JSON.stringify([{ 'src': `${returnLink}` }]), 
+        JSON.stringify([{ 'src': `${returnLink}` }]),
         {
             status: 200,
-            headers: { 
+            headers: {
                 'Content-Type': 'application/json',
             }
         }
@@ -274,7 +266,9 @@ async function uploadFileToCloudflareR2(context, fullId, metadata, returnLink) {
 
 // 上传到 S3（支持自定义端点）
 async function uploadFileToS3(context, fullId, metadata, returnLink) {
-    const { env, uploadConfig, securityConfig, url, formdata } = context;
+    const { env, waitUntil, uploadConfig, securityConfig, url, formdata } = context;
+    const db = getDatabase(env);
+
     const uploadModerate = securityConfig.upload.moderate;
 
     const s3Settings = uploadConfig.s3;
@@ -343,26 +337,29 @@ async function uploadFileToS3(context, fullId, metadata, returnLink) {
         // 图像审查
         if (uploadModerate && uploadModerate.enabled) {
             try {
-                await env.img_url.put(fullId, "", { metadata });
+                await db.put(fullId, "", { metadata });
             } catch {
                 return createResponse("Error: Failed to write to KV database", { status: 500 });
             }
 
             const moderateUrl = `https://${url.hostname}/file/${fullId}`;
-            metadata.Label = await moderateContent(env, moderateUrl);
             await purgeCDNCache(env, moderateUrl, url);
+            metadata.Label = await moderateContent(env, moderateUrl);
         }
 
-        // 写入 KV 数据库
+        // 写入数据库
         try {
-            await env.img_url.put(fullId, "", { metadata });
+            await db.put(fullId, "", { metadata });
         } catch {
-            return createResponse("Error: Failed to write to KV database", { status: 500 });
+            return createResponse("Error: Failed to write to database", { status: 500 });
         }
+
+        // 结束上传
+        waitUntil(endUpload(context, fullId, metadata));
 
         return createResponse(JSON.stringify([{ src: returnLink }]), {
             status: 200,
-            headers: { 
+            headers: {
                 "Content-Type": "application/json",
             },
         });
@@ -374,12 +371,13 @@ async function uploadFileToS3(context, fullId, metadata, returnLink) {
 
 // 上传到Telegram
 async function uploadFileToTelegram(context, fullId, metadata, fileExt, fileName, fileType, returnLink) {
-    const { env, uploadConfig, url, formdata } = context;
+    const { env, waitUntil, uploadConfig, url, formdata } = context;
+    const db = getDatabase(env);
 
     // 选择一个 Telegram 渠道上传，若负载均衡开启，则随机选择一个；否则选择第一个
     const tgSettings = uploadConfig.telegram;
     const tgChannels = tgSettings.channels;
-    const tgChannel = tgSettings.loadBalance.enabled? tgChannels[Math.floor(Math.random() * tgChannels.length)] : tgChannels[0];
+    const tgChannel = tgSettings.loadBalance.enabled ? tgChannels[Math.floor(Math.random() * tgChannels.length)] : tgChannels[0];
     if (!tgChannel) {
         return createResponse('Error: No Telegram channel provided', { status: 400 });
     }
@@ -390,10 +388,10 @@ async function uploadFileToTelegram(context, fullId, metadata, fileExt, fileName
     const fileSize = file.size;
 
     const telegramAPI = new TelegramAPI(tgBotToken);
-    
+
     // 20MB 分片阈值
     const CHUNK_SIZE = 20 * 1024 * 1024; // 20MB
-    
+
     if (fileSize > CHUNK_SIZE) {
         // 大文件分片上传
         return await uploadLargeFileToTelegram(env, file, fullId, metadata, fileName, fileType, url, returnLink, tgBotToken, tgChatId, tgChannel);
@@ -408,32 +406,34 @@ async function uploadFileToTelegram(context, fullId, metadata, fileExt, fileName
         const newFileName = fileName.replace(/\.webp$/, '.jpeg');
         const newFile = new File([formdata.get('file')], newFileName, { type: fileType });
         formdata.set('file', newFile);
-    }
+    } 
 
     // 选择对应的发送接口
     const fileTypeMap = {
-        'image/': {'url': 'sendPhoto', 'type': 'photo'},
-        'video/': {'url': 'sendVideo', 'type': 'video'},
-        'audio/': {'url': 'sendAudio', 'type': 'audio'},
-        'application/pdf': {'url': 'sendDocument', 'type': 'document'},
+        'image/': { 'url': 'sendPhoto', 'type': 'photo' },
+        'video/': { 'url': 'sendVideo', 'type': 'video' },
+        'audio/': { 'url': 'sendAudio', 'type': 'audio' },
+        'application/pdf': { 'url': 'sendDocument', 'type': 'document' },
     };
 
-    const defaultType = {'url': 'sendDocument', 'type': 'document'};
+    const defaultType = { 'url': 'sendDocument', 'type': 'document' };
 
-    let sendFunction = Object.keys(fileTypeMap).find(key => fileType.startsWith(key)) 
-        ? fileTypeMap[Object.keys(fileTypeMap).find(key => fileType.startsWith(key))] 
+    let sendFunction = Object.keys(fileTypeMap).find(key => fileType.startsWith(key))
+        ? fileTypeMap[Object.keys(fileTypeMap).find(key => fileType.startsWith(key))]
         : defaultType;
 
-    // GIF 发送接口特殊处理
+    // GIF ICO 等发送接口特殊处理
     if (fileType === 'image/gif' || fileType === 'image/webp' || fileExt === 'gif' || fileExt === 'webp') {
-        sendFunction = {'url': 'sendAnimation', 'type': 'animation'};
+        sendFunction = { 'url': 'sendAnimation', 'type': 'animation' };
+    } else if (fileType === 'image/svg+xml' || fileType === 'image/x-icon') {
+        sendFunction = { 'url': 'sendDocument', 'type': 'document' };
     }
 
     // 根据服务端压缩设置处理接口：从参数中获取serverCompress，如果为false，则使用sendDocument接口
     if (url.searchParams.get('serverCompress') === 'false') {
-        sendFunction = {'url': 'sendDocument', 'type': 'document'};
+        sendFunction = { 'url': 'sendDocument', 'type': 'document' };
     }
-    
+
     // 上传文件到 Telegram
     let res = createResponse('upload error, check your environment params about telegram channel!', { status: 400 });
     try {
@@ -449,7 +449,7 @@ async function uploadFileToTelegram(context, fullId, metadata, fileExt, fileName
             JSON.stringify([{ 'src': `${returnLink}` }]),
             {
                 status: 200,
-                headers: { 
+                headers: {
                     'Content-Type': 'application/json',
                 }
             }
@@ -468,13 +468,18 @@ async function uploadFileToTelegram(context, fullId, metadata, fileExt, fileName
             metadata.TgFileId = id;
             metadata.TgChatId = tgChatId;
             metadata.TgBotToken = tgBotToken;
-            await env.img_url.put(fullId, "", {
+            await db.put(fullId, "", {
                 metadata: metadata,
             });
         } catch (error) {
             res = createResponse('Error: Failed to write to KV database', { status: 500 });
         }
+
+        // 结束上传
+        waitUntil(endUpload(context, fullId, metadata));
+
     } catch (error) {
+        console.log('Telegram upload error:', error.message);
         res = createResponse('upload error, check your environment params about telegram channel!', { status: 400 });
     } finally {
         return res;
@@ -484,7 +489,8 @@ async function uploadFileToTelegram(context, fullId, metadata, fileExt, fileName
 
 // 外链渠道
 async function uploadFileToExternal(context, fullId, metadata, returnLink) {
-    const { env, formdata } = context;
+    const { env, waitUntil, formdata } = context;
+    const db = getDatabase(env);
 
     // 直接将外链写入metadata
     metadata.Channel = "External";
@@ -497,19 +503,22 @@ async function uploadFileToExternal(context, fullId, metadata, returnLink) {
     metadata.ExternalLink = extUrl;
     // 写入KV数据库
     try {
-        await env.img_url.put(fullId, "", {
+        await db.put(fullId, "", {
             metadata: metadata,
         });
     } catch (error) {
         return createResponse('Error: Failed to write to KV database', { status: 500 });
     }
 
+    // 结束上传
+    waitUntil(endUpload(context, fullId, metadata));
+
     // 返回结果
     return createResponse(
-        JSON.stringify([{ 'src': `${returnLink}` }]), 
+        JSON.stringify([{ 'src': `${returnLink}` }]),
         {
             status: 200,
-            headers: { 
+            headers: {
                 'Content-Type': 'application/json',
             }
         }
@@ -524,7 +533,7 @@ async function tryRetry(err, context, uploadChannel, fullId, metadata, fileExt, 
     const channelList = ['CloudflareR2', 'TelegramNew', 'S3'];
     const errMessages = {};
     errMessages[uploadChannel] = 'Error: ' + uploadChannel + err;
-    
+
     for (let i = 0; i < channelList.length; i++) {
         if (channelList[i] !== uploadChannel) {
             let res = null;
